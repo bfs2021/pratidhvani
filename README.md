@@ -1,4 +1,7 @@
-# indic-voice-clone
+# pratidhvani
+
+प्रतिध्वनि, *pratidhvani*: Sanskrit for "echo", a returning sound. Formerly
+`indic-voice-clone`.
 
 Clone one speaker of an Indic language, regional accent included, from a few
 archival recordings. It was built and tested on northern Kannada lecture tapes,
@@ -75,7 +78,7 @@ brew install ffmpeg uv
 ```
 
 ```bash
-uv tool install "indic-voice-clone[all]"
+uv tool install "pratidhvani[all]"
 ```
 
 ```bash
@@ -87,7 +90,7 @@ manager and uv from https://docs.astral.sh/uv/. A C++ compiler is needed once,
 to build the aligner (`xcode-select --install` on a Mac; `build-essential`
 on Debian or Ubuntu). For the gated IndicConformer model, accept its terms on
 Hugging Face and run `hf auth login`, or set `HF_TOKEN`. The models need about
-10 GB of disk on first use. `uv tool upgrade indic-voice-clone` updates it.
+10 GB of disk on first use. `uv tool upgrade pratidhvani` updates it.
 
 The package is published to PyPI from each release (see
 [CONTRIBUTING.md](CONTRIBUTING.md#releasing)). Until the first release,
@@ -96,8 +99,8 @@ install from source.
 ### From source
 
 ```bash
-git clone https://github.com/svayatta/indic-voice-clone.git
-cd indic-voice-clone
+git clone https://github.com/svayatta/pratidhvani.git
+cd pratidhvani
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e ".[all]" -c constraints.txt
 source .venv/bin/activate
@@ -252,7 +255,7 @@ listens on this computer only unless you pass `--host`.
 ## Docker
 
 Each merge to `main` publishes an image for linux/amd64 and linux/arm64 to
-`ghcr.io/svayatta/indic-voice-clone` (`latest`, plus a `sha-…` tag per
+`ghcr.io/svayatta/pratidhvani` (`latest`, plus a `sha-…` tag per
 commit). It contains the `voiceclone` command and every extra, and runs the
 voice studio by default.
 
@@ -279,17 +282,17 @@ use `:cuda` with `--gpus all` instead (linux/amd64, about 6 GB, CUDA 12.6;
 any CUDA 12 driver, 525 or newer):
 
 ```bash
-docker run -d --name voiceclone --gpus all -p 127.0.0.1:8000:8000 -v voiceclone:/data -e HF_TOKEN=hf_... ghcr.io/svayatta/indic-voice-clone:cuda
+docker run -d --name voiceclone --gpus all -p 127.0.0.1:8000:8000 -v voiceclone:/data -e HF_TOKEN=hf_... ghcr.io/svayatta/pratidhvani:cuda
 ```
 
 On a CPU-only machine:
 
 ```bash
-docker pull ghcr.io/svayatta/indic-voice-clone:latest
+docker pull ghcr.io/svayatta/pratidhvani:latest
 ```
 
 ```bash
-docker run -d --name voiceclone -p 127.0.0.1:8000:8000 -v voiceclone:/data -e HF_TOKEN=hf_... ghcr.io/svayatta/indic-voice-clone:latest
+docker run -d --name voiceclone -p 127.0.0.1:8000:8000 -v voiceclone:/data -e HF_TOKEN=hf_... ghcr.io/svayatta/pratidhvani:latest
 ```
 
 Open http://127.0.0.1:8000. The first sample takes a few minutes while the
@@ -301,7 +304,7 @@ models download into the `voiceclone` volume; later runs reuse them.
 | Follow the log | `docker logs -f voiceclone` |
 | Stop it | `docker stop voiceclone` |
 | Start it again (same settings and data) | `docker start voiceclone` |
-| Update to the newest image | `docker pull ghcr.io/svayatta/indic-voice-clone:latest`, then `docker rm -f voiceclone` and the `docker run` above |
+| Update to the newest image | `docker pull ghcr.io/svayatta/pratidhvani:latest`, then `docker rm -f voiceclone` and the `docker run` above |
 | Remove the container | `docker rm -f voiceclone` (voices and models stay in the volume) |
 | Delete all voices and downloaded models | `docker volume rm voiceclone` |
 
@@ -315,13 +318,13 @@ Any `voiceclone` subcommand runs the same way. Mount the folder with your
 recordings at `/work`:
 
 ```bash
-docker run --rm -v voiceclone:/data -v "$PWD:/work" ghcr.io/svayatta/indic-voice-clone:latest restore /work/talk.mp3 --decode-first --out /work/talk_clean.wav
+docker run --rm -v voiceclone:/data -v "$PWD:/work" ghcr.io/svayatta/pratidhvani:latest restore /work/talk.mp3 --decode-first --out /work/talk_clean.wav
 ```
 
 To check a recording for the [watermark](#watermark):
 
 ```bash
-docker run --rm -v voiceclone:/data -v "$PWD:/work" ghcr.io/svayatta/indic-voice-clone:latest detect /work/suspect.mp3
+docker run --rm -v voiceclone:/data -v "$PWD:/work" ghcr.io/svayatta/pratidhvani:latest detect /work/suspect.mp3
 ```
 
 ### Build the image yourself
@@ -329,15 +332,15 @@ docker run --rm -v voiceclone:/data -v "$PWD:/work" ghcr.io/svayatta/indic-voice
 From a checkout of this repository:
 
 ```bash
-docker build -t indic-voice-clone .
+docker build -t pratidhvani .
 ```
 
 ```bash
-docker run -d --name voiceclone -p 127.0.0.1:8000:8000 -v voiceclone:/data -e HF_TOKEN=hf_... indic-voice-clone
+docker run -d --name voiceclone -p 127.0.0.1:8000:8000 -v voiceclone:/data -e HF_TOKEN=hf_... pratidhvani
 ```
 
 To build for the other architecture (for example amd64 on an Apple-silicon
-Mac), use `docker buildx build --platform linux/amd64 -t indic-voice-clone --load .`.
+Mac), use `docker buildx build --platform linux/amd64 -t pratidhvani --load .`.
 It builds under emulation, so it takes longer.
 
 ### What it can't do
@@ -364,7 +367,7 @@ voiceclone detect suspect.mp3 another.wav
 ```
 
 ```
-suspect.mp3: made with indic-voice-clone (detector 1.00, 16/16 tag bits)
+suspect.mp3: made with pratidhvani (detector 1.00, 16/16 tag bits)
 another.wav: no watermark found (detector 0.00, 8/16 tag bits)
 ```
 
