@@ -1,0 +1,505 @@
+"""`voiceclone` command line: one subcommand per pipeline step.
+
+Every path is an argument; defaults follow the layout in the README
+(data/, models/, outputs/ under the current directory).
+"""
+import argparse
+import sys
+from pathlib import Path
+
+from voiceclone.svara.synth import DEFAULT_MODEL
+
+
+def _log(*a):
+    print(*a, flush=True)
+
+
+# ---------- data preparation ----------
+def cmd_restore(a):
+    from voiceclone.audio import ffmpeg_decode, integrated_loudness, restore
+
+    src = Path(a.src)
+    if a.decode_first:
+        src = ffmpeg_decode(src, Path(a.out).with_name(Path(a.out).stem + "_48k.wav"), 48000)
+    restore(src, a.out)
+    _log(f"wrote {a.out}  {integrated_loudness(a.out)}")
+
+
+def cmd_parse_transcript(a):
+    from voiceclone.jsonl import write_json
+    from voiceclone.transcript import non_monotonic, parse_timed_transcript
+
+    utts, bad = parse_timed_transcript(Path(a.src).read_text(encoding="utf-8"))
+    for line in bad:
+        _log("UNPARSED:", line[:80])
+    if non_monotonic(utts):
+        _log("non-monotonic starts at idx:", non_monotonic(utts))
+    write_json(a.out, utts)
+    from collections import Counter
+
+    _log(f"{len(utts)} utterances, speakers={dict(Counter(u['speaker'] for u in utts))}")
+
+
+def cmd_align(a):
+    import json
+
+    from voiceclone.align import Aligner, align_recording
+    from voiceclone.jsonl import write_json
+
+    utts = json.load(open(a.utterances, encoding="utf-8"))
+    write_json(a.out, align_recording(Aligner(), a.audio, utts, a.emissions_cache, log=_log))
+    _log("wrote", a.out)
+
+
+def cmd_segment(a):
+    import json
+
+    from voiceclone.audio import load_wav
+    from voiceclone.segment import AlignedSegmentParams, segment_aligned
+
+    wav = load_wav(a.audio, a.sr)
+    p = AlignedSegmentParams(min_sps=a.min_sps, min_mean=a.min_mean)
+    _log(segment_aligned(json.load(open(a.aligned, encoding="utf-8")), wav, a.sr, a.out, a.speaker, p))
+
+
+def cmd_vad(a):
+    from voiceclone.audio import load_wav
+    from voiceclone.segment import VadParams, vad_segment
+
+    p = VadParams(min_dur=a.min_dur, max_dur=a.max_dur, ideal=a.ideal)
+    _log(vad_segment(load_wav(a.audio, a.sr), a.sr, a.out, a.prefix, p))
+
+
+def cmd_transcribe(a):
+    from voiceclone.asr import transcribe_dir
+
+    _log("wrote", transcribe_dir(a.vad, a.lang, a.limit, log=_log))
+
+
+def cmd_build_clips(a):
+    from voiceclone.align import Aligner
+    from voiceclone.dataset import ClipFilter, build_clips
+    from voiceclone.speaker import SpeakerEncoder
+
+    enc = SpeakerEncoder(a.ecapa_dir)
+    cent = enc.centroid_from_clips(a.enroll, a.n_enroll)
+    lo, hi = a.min_f0, a.max_f0
+    if a.f0_from_enroll:
+        from voiceclone.dataset import f0_range
+        from voiceclone.jsonl import read_jsonl
+
+        lo, hi = f0_range([Path(a.enroll) / c["file"] for c in read_jsonl(Path(a.enroll) / "metadata.jsonl")])
+        _log(f"pitch window from the enrollment clips: {lo:.0f}-{hi:.0f} Hz")
+    f = ClipFilter(min_sim=a.min_sim, min_f0=lo, max_f0=hi)
+    _log(build_clips(a.vad, a.out, enc, Aligner(), cent, f, log=_log))
+
+
+def cmd_rank(a):
+    from voiceclone.jsonl import write_json
+    from voiceclone.rank import rank_recordings
+    from voiceclone.speaker import SpeakerEncoder
+
+    enc = SpeakerEncoder(a.ecapa_dir)
+    write_json(a.out, rank_recordings(a.paths, enc, enc.centroid_from_clips(a.enroll, a.n_enroll), log=_log))
+
+
+def cmd_prepare(a):
+    from voiceclone.prepare import prepare_recording
+
+    prepare_recording(a.src, a.tag, a.data_dir, a.lang, a.enhance_python, a.enhance_wet, log=_log)
+
+
+def cmd_import_vault(a):
+    from voiceclone.vault import import_vault
+
+    _log(import_vault(a.index, a.vault_dir, a.out, a.min_dnsmos, a.min_spk, log=_log))
+
+
+def cmd_audacity(a):
+    from voiceclone.enhance.audacity import audacity_denoise
+
+    chunks_out = a.chunks_out or (str(Path(a.data_dir) / f"vad_{a.tag}_aud") if a.reuse_chunks else None)
+    audacity_denoise(a.src, Path(a.data_dir) / "work" / a.tag, a.app, a.reuse_chunks, chunks_out,
+                     force_restart=a.force_restart, log=_log)
+
+
+# ---------- model ----------
+def _gen_params(a):
+    from voiceclone.svara.synth import GenParams
+
+    return GenParams(temperature=a.temperature, top_p=a.top_p, repetition_penalty=a.rep,
+                     max_sec=a.max_sec, min_sps=a.min_sps, max_sps=a.max_sps)
+
+
+def _sentences(a) -> list[str]:
+    from voiceclone.jsonl import read_lines
+
+    s = list(a.text or [])
+    if a.text_file:
+        s += read_lines(a.text_file)
+    return s
+
+
+def cmd_synth(a):
+    from voiceclone.svara.synth import Synthesizer, synthesize_to_dir
+
+    sentences = _sentences(a)
+    if not sentences:
+        sys.exit("give --text or --text-file")
+    ref_text = a.ref_text or (Path(a.ref_text_file).read_text(encoding="utf-8").strip() if a.ref_text_file else None)
+    synth = Synthesizer(a.model, a.lora)
+    synthesize_to_dir(synth, sentences, a.ref, ref_text, a.out, a.seed, _gen_params(a), log=_log)
+
+
+def cmd_detect(a):
+    from voiceclone.audio import load16
+    from voiceclone.watermark import SR, Watermark
+
+    wm, found = Watermark(), 0
+    for f in a.files:
+        d = wm.detect(load16(f), SR)
+        found += d.ours
+        verdict = ("made with indic-voice-clone" if d.ours else
+                   "AudioSeal watermark from another source" if d.marked else "no watermark found")
+        print(f"{f}: {verdict} (detector {d.probability:.2f}, {16 - d.bit_errors}/16 tag bits)")
+    if not found:
+        print("no watermark doesn't prove a recording is genuine: the code can be changed, and heavy noise can hide it")
+
+
+def cmd_train(a):
+    from voiceclone.train import TrainParams, finetune
+
+    p = TrainParams(epochs=a.epochs, lr=a.lr, rank=a.rank, max_ref_sec=a.max_ref_sec, max_tgt_sec=a.max_tgt_sec,
+                    grad_accum=a.grad_accum, holdout=a.holdout, max_steps=a.max_steps, seed=a.seed,
+                    init_adapter=a.init_adapter, save_every=a.save_every)
+    finetune(a.clips, a.out, a.model, p, log=_log)
+
+
+def cmd_long_form(a):
+    from voiceclone.longform import long_form
+    from voiceclone.svara.synth import Synthesizer
+
+    ref_text = Path(a.ref_text_file).read_text(encoding="utf-8").strip()
+    long_form(Synthesizer(a.model, a.lora), a.chunks, a.source, a.ref, ref_text, a.out, a.minutes, a.seed, log=_log)
+
+
+# ---------- evaluation ----------
+def cmd_eval_similarity(a):
+    from voiceclone.evaluate import similarity_report
+    from voiceclone.jsonl import write_json
+    from voiceclone.speaker import SpeakerEncoder
+
+    write_json(a.report, similarity_report(SpeakerEncoder(a.ecapa_dir), a.clips, a.samples, a.file,
+                                           a.n_enroll, log=_log))
+
+
+def cmd_eval_intelligibility(a):
+    from voiceclone.align import Aligner
+    from voiceclone.evaluate import intelligibility_report
+    from voiceclone.jsonl import write_json
+
+    write_json(a.report, intelligibility_report(Aligner(), a.clips, _maybe_lines(a.sentences), a.samples,
+                                                a.holdout, a.n_real, log=_log))
+
+
+def _maybe_lines(path):
+    from voiceclone.jsonl import read_lines
+
+    return read_lines(path) if path else None
+
+
+def cmd_trim(a):
+    from voiceclone.align import Aligner
+    from voiceclone.postprocess import trim_to_text
+
+    _log("wrote", trim_to_text(Aligner(), a.samples, _maybe_lines(a.sentences), a.out, a.tail, log=_log))
+
+
+def cmd_best_of(a):
+    from voiceclone.align import Aligner
+    from voiceclone.evaluate import best_of
+    from voiceclone.jsonl import write_json
+    from voiceclone.speaker import SpeakerEncoder
+
+    enc = SpeakerEncoder(a.ecapa_dir)
+    cent = enc.centroid_from_clips(a.clips, a.n_enroll, shuffle_seed=0)
+    rep = best_of(enc, Aligner(), cent, a.takes, a.out, _maybe_lines(a.sentences), a.pick, a.max_cer, log=_log)
+    write_json(Path(a.out) / "selection.json", rep)
+
+
+# ---------- comparing runs ----------
+def cmd_benchmark(a):
+    from voiceclone.benchmark import LeakError, run_benchmark
+
+    try:
+        run_benchmark(a.spec, a.out, a.lora, a.model, a.allow_leak, a.train_clips, a.leaderboard, a.ecapa_dir,
+                      log=_log)
+    except LeakError as e:
+        sys.exit(f"refusing to score: {e}")
+
+
+def cmd_compare(a):
+    import json
+
+    from voiceclone.compare import compare_runs, format_report, listening_results, load_run
+    from voiceclone.jsonl import write_json
+
+    ra, rb = load_run(a.run_a), load_run(a.run_b)
+    metrics = compare_runs(ra, rb, a.n_boot)
+    listening = None
+    if a.answers:
+        if not a.key:
+            sys.exit("--answers needs --key (the .key.json written next to the listening page)")
+        listening = listening_results(json.load(open(a.key, encoding="utf-8")),
+                                      [json.load(open(f, encoding="utf-8")) for f in a.answers], a.run_a, a.run_b)
+    _log(format_report(ra, rb, metrics, listening))
+    if a.report:
+        write_json(a.report, {"a": a.run_a, "b": a.run_b, "metrics": metrics, "listening": listening})
+
+
+def cmd_listen_page(a):
+    from voiceclone.listen import write_listening_page
+
+    write_listening_page(a.run_a, a.run_b, a.out, a.check_every, a.seed, log=_log)
+
+
+def cmd_run_recipe(a):
+    from voiceclone.recipe import run_recipe
+
+    _log("wrote", run_recipe(a.recipe, a.data, a.work, a.spec, log=_log))
+
+
+def cmd_gate(a):
+    from voiceclone.compare import compare_runs, load_run
+    from voiceclone.gate import evaluate_gate, format_markdown
+
+    base, cand = load_run(a.baseline), load_run(a.candidate)
+    metrics = compare_runs(base, cand, a.n_boot)
+    result = evaluate_gate(base, cand, metrics, a.require_improvement)
+    md = format_markdown(base, cand, metrics, result)
+    _log(md)
+    if a.report:
+        Path(a.report).write_text(md + "\n", encoding="utf-8")
+    sys.exit(0 if result["passed"] else 1)
+
+
+# ---------- studio ----------
+def cmd_serve(a):
+    import uvicorn
+
+    from voiceclone.studio.app import create_app
+    from voiceclone.studio.engine import Engine
+    from voiceclone.studio.jobs import Studio
+
+    engine = Engine(a.model, a.ecapa_dir, a.enhance_python, a.min_train_minutes)
+    _log(f"voice studio on http://{a.host}:{a.port}  (voices in {Path(a.root).resolve()})")
+    uvicorn.run(create_app(Studio(a.root, engine)), host=a.host, port=a.port, log_level="warning")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(prog="voiceclone", description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def add(name, fn, help_):
+        p = sub.add_parser(name, help=help_, description=help_)
+        p.set_defaults(fn=fn)
+        return p
+
+    def ecapa(p):
+        p.add_argument("--ecapa-dir", default="models/ecapa", help="where the ECAPA encoder is cached")
+
+    # data preparation
+    p = add("restore", cmd_restore, "Light ffmpeg restoration to mono 24 kHz (keeps vowel quality)")
+    p.add_argument("src"); p.add_argument("--out", default="data/work/full_24k_clean.wav")
+    p.add_argument("--decode-first", action="store_true", help="decode to 48 kHz WAV first (MP3 input)")
+
+    p = add("parse-transcript", cmd_parse_transcript, "Timed transcript [SS:MM:00] [Speaker] : text -> JSON")
+    p.add_argument("src"); p.add_argument("--out", default="data/work/utterances.json")
+
+    p = add("align", cmd_align, "Force-align a full transcript to a full recording")
+    p.add_argument("--audio", default="data/work/full_24k_clean.wav")
+    p.add_argument("--utterances", default="data/work/utterances.json")
+    p.add_argument("--out", default="data/work/aligned.json")
+    p.add_argument("--emissions-cache", default="data/work/emissions.npz")
+
+    p = add("segment", cmd_segment, "Cut aligned target-speaker speech into training clips")
+    p.add_argument("--speaker", required=True, help="speaker label in the transcript to keep")
+    p.add_argument("--aligned", default="data/work/aligned.json")
+    p.add_argument("--audio", default="data/work/full_24k_clean.wav")
+    p.add_argument("--out", default="data/clips"); p.add_argument("--sr", type=int, default=24000)
+    p.add_argument("--min-sps", type=float, default=2.0); p.add_argument("--min-mean", type=float, default=-1.8)
+
+    p = add("vad", cmd_vad, "Cut a recording into 3-10 s chunks at natural pauses (no transcript)")
+    p.add_argument("--audio", default="data/work/full_24k_clean.wav")
+    p.add_argument("--out", default="data/vad"); p.add_argument("--prefix", default="seg")
+    p.add_argument("--sr", type=int, default=24000)
+    p.add_argument("--min-dur", type=float, default=3.0); p.add_argument("--max-dur", type=float, default=10.0)
+    p.add_argument("--ideal", type=float, default=8.0)
+
+    p = add("transcribe", cmd_transcribe, "Verbatim transcription of chunks with IndicConformer (resumable)")
+    p.add_argument("--vad", default="data/vad"); p.add_argument("--lang", default="kn")
+    p.add_argument("--limit", type=int, default=0)
+
+    p = add("build-clips", cmd_build_clips, "Keep chunks that are the speaker and whose transcript fits")
+    p.add_argument("--vad", action="append", required=True, help="transcribed chunk folder (repeatable)")
+    p.add_argument("--enroll", required=True, help="clip folder (metadata.jsonl) of the target speaker")
+    p.add_argument("--n-enroll", type=int, default=40)
+    p.add_argument("--out", default="data/clips_v2"); p.add_argument("--min-sim", type=float, default=0.5)
+    p.add_argument("--min-f0", type=float, default=None, help="drop chunks whose median pitch is below this (Hz)")
+    p.add_argument("--max-f0", type=float, default=None, help="drop chunks whose median pitch is above this (Hz)")
+    p.add_argument("--f0-from-enroll", action="store_true",
+                   help="pitch window = 5th-95th percentile of the enrollment clips' median pitch")
+    ecapa(p)
+
+    p = add("rank", cmd_rank, "Rank recordings by speaker match, SNR, bandwidth and speech density")
+    p.add_argument("paths", nargs="+"); p.add_argument("--enroll", required=True)
+    p.add_argument("--n-enroll", type=int, default=40)
+    p.add_argument("--out", default="outputs/recording_rank.json"); ecapa(p)
+
+    p = add("prepare", cmd_prepare, "Decode, restore, segment, (denoise), transcribe one extra recording")
+    p.add_argument("src"); p.add_argument("tag"); p.add_argument("--lang", default="kn")
+    p.add_argument("--data-dir", default="data")
+    p.add_argument("--enhance-python", default=None, help="python of an env with clearvoice (numpy<2)")
+    p.add_argument("--enhance-wet", type=float, default=1.0, help="enhanced share when denoising (0.9 keeps some warmth)")
+
+    p = add("audacity-denoise", cmd_audacity, "Remove hiss, mains hum and clicks with Audacity 3.x")
+    p.add_argument("src"); p.add_argument("tag"); p.add_argument("--data-dir", default="data")
+    p.add_argument("--app", default=str(Path.home() / "Applications/Audacity 3.7.app"))
+    p.add_argument("--reuse-chunks", default=None, help="re-cut chunks at this folder's times, keep transcripts")
+    p.add_argument("--chunks-out", default=None)
+    p.add_argument("--force-restart", action="store_true",
+                   help="quit an already-open Audacity first (its unsaved changes are lost)")
+
+    p = add("import-vault", cmd_import_vault, "Import Vani-Harness cloning-vault segments as chunks")
+    p.add_argument("index", help="the vault's metadata.jsonl or vault_admitted_segments.jsonl")
+    p.add_argument("--vault-dir", required=True, help="folder holding the vault WAVs (matched by file name)")
+    p.add_argument("--out", required=True, help="new chunk folder; next run transcribe, then build-clips")
+    p.add_argument("--min-dnsmos", type=float, default=None, help="also require DNSMOS OVRL >= this")
+    p.add_argument("--min-spk", type=float, default=None, help="also require the vault's speaker cosine >= this")
+
+    # model
+    def gen(p, min_sps=2.0):
+        p.add_argument("--model", default=DEFAULT_MODEL, help="Hugging Face id or local folder")
+        p.add_argument("--lora", default=None, help="PEFT adapter folder")
+        p.add_argument("--temperature", type=float, default=0.6); p.add_argument("--top-p", type=float, default=0.95)
+        p.add_argument("--rep", type=float, default=1.1)
+        p.add_argument("--max-sec", type=float, default=20.0, help="hard cap per sentence")
+        p.add_argument("--min-sps", type=float, default=min_sps, help="cap at syllables/min_sps + 1.5 s")
+        p.add_argument("--max-sps", type=float, default=6.0, help="floor at syllables/max_sps s")
+        p.add_argument("--seed", type=int, default=0)
+
+    p = add("detect", cmd_detect, "Check recordings for the watermark that every generated take carries")
+    p.add_argument("files", nargs="+", help="audio files (WAV, MP3, M4A, ... anything librosa reads)")
+
+    p = add("synth", cmd_synth, "Speak sentences in the reference speaker's voice")
+    p.add_argument("--ref", required=True, help="reference clip of the speaker (4-8 s works well)")
+    p.add_argument("--ref-text", default=None); p.add_argument("--ref-text-file", default=None)
+    p.add_argument("--text", action="append"); p.add_argument("--text-file", default=None)
+    p.add_argument("--out", default="outputs/synth"); gen(p)
+
+    p = add("train", cmd_train, "LoRA fine-tune on the speaker's clips (reference-swap)")
+    p.add_argument("--clips", required=True); p.add_argument("--out", required=True)
+    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--epochs", type=int, default=3); p.add_argument("--lr", type=float, default=2e-4)
+    p.add_argument("--rank", type=int, default=16)
+    p.add_argument("--max-ref-sec", type=float, default=4.5); p.add_argument("--max-tgt-sec", type=float, default=10.5)
+    p.add_argument("--grad-accum", type=int, default=4); p.add_argument("--holdout", type=int, default=6)
+    p.add_argument("--max-steps", type=int, default=0); p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--init-adapter", default=None, help="continue training this saved LoRA")
+    p.add_argument("--save-every", type=int, default=50,
+                   help="keep a checkpoint-NNNNN/ adapter every N steps (0 = final only)")
+
+    p = add("long-form", cmd_long_form, "Re-voice minutes of a real recording with the same words")
+    p.add_argument("--lora", required=True); p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--chunks", required=True, help="folder with segments.jsonl + transcripts.jsonl")
+    p.add_argument("--source", required=True, help="the full cleaned recording the chunks came from")
+    p.add_argument("--ref", required=True); p.add_argument("--ref-text-file", required=True)
+    p.add_argument("--minutes", type=float, default=5.0); p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--out", required=True)
+
+    # evaluation
+    p = add("eval-similarity", cmd_eval_similarity, "Voiceprint similarity of samples to the speaker")
+    p.add_argument("--clips", required=True); p.add_argument("--samples", action="append", default=[])
+    p.add_argument("--file", action="append", default=[]); p.add_argument("--n-enroll", type=int, default=40)
+    p.add_argument("--report", default="outputs/similarity_report.json"); ecapa(p)
+
+    p = add("eval-intelligibility", cmd_eval_intelligibility, "Character error of samples vs real clips")
+    p.add_argument("--clips", required=True); p.add_argument("--samples", action="append", default=[])
+    p.add_argument("--sentences", default=None, help="only needed for sample folders without log.json")
+    p.add_argument("--holdout", default=None, help="holdout.json written by train")
+    p.add_argument("--n-real", type=int, default=10)
+    p.add_argument("--report", default="outputs/intelligibility_report.json")
+
+    p = add("trim", cmd_trim, "Cut each sample just after the last word of its sentence")
+    p.add_argument("--samples", required=True); p.add_argument("--out", default=None)
+    p.add_argument("--sentences", default=None, help="only needed if the samples have no log.json")
+    p.add_argument("--tail", type=float, default=0.3)
+
+    p = add("best-of", cmd_best_of, "Pick the best of several takes per sentence")
+    p.add_argument("--takes", action="append", required=True); p.add_argument("--out", required=True)
+    p.add_argument("--clips", required=True, help="speaker clips for the voiceprint")
+    p.add_argument("--n-enroll", type=int, default=100); p.add_argument("--max-cer", type=float, default=0.85)
+    p.add_argument("--pick", choices=["gated", "voice"], default="gated")
+    p.add_argument("--sentences", default=None, help="only needed for take folders without log.json")
+    ecapa(p)
+
+    # comparing runs
+    p = add("benchmark", cmd_benchmark, "Score one adapter on a frozen benchmark spec")
+    p.add_argument("--spec", required=True, help="benchmark spec JSON (see examples/bench_spec.example.json)")
+    p.add_argument("--lora", default=None, help="PEFT adapter folder (omit for zero-shot)")
+    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--out", required=True, help="run folder, e.g. outputs/bench/RUN")
+    p.add_argument("--leaderboard", default=None, help="results.jsonl to append to (default: next to --out)")
+    p.add_argument("--allow-leak", action="store_true",
+                   help="score even if the adapter trained on a benchmark recording (the row is flagged)")
+    p.add_argument("--train-clips", action="append", default=None,
+                   help="clip folder(s) the adapter trained on, if its train_log.json cannot say")
+    ecapa(p)
+
+    p = add("compare", cmd_compare, "Is benchmark run B better than run A? (paired takes, bootstrap interval)")
+    p.add_argument("run_a"); p.add_argument("run_b")
+    p.add_argument("--answers", action="append", default=[], help="listening-page answers JSON (repeatable)")
+    p.add_argument("--key", default=None, help="the listening page's .key.json")
+    p.add_argument("--n-boot", type=int, default=10000)
+    p.add_argument("--report", default=None, help="also write the comparison as JSON")
+
+    p = add("listen-page", cmd_listen_page, "Blind A/B listening page for two benchmark runs")
+    p.add_argument("run_a"); p.add_argument("run_b")
+    p.add_argument("--out", required=True, help="HTML file; its .key.json is written next to it")
+    p.add_argument("--check-every", type=int, default=6, help="one hidden real-clip check per N trials (0 = none)")
+    p.add_argument("--seed", type=int, default=0)
+
+    # quality gate
+    p = add("run-recipe", cmd_run_recipe, "Run a recipe (ci/recipe.json) end to end and benchmark its adapter")
+    p.add_argument("--recipe", default="ci/recipe.json")
+    p.add_argument("--data", required=True, help="the shared, read-only data folder ({data} in the recipe)")
+    p.add_argument("--work", required=True, help="new folder for this run ({work} in the recipe)")
+    p.add_argument("--spec", required=True, help="benchmark spec JSON")
+
+    p = add("gate", cmd_gate, "Pass or fail a candidate benchmark run against main's (exit code 1 = fail)")
+    p.add_argument("baseline"); p.add_argument("candidate")
+    p.add_argument("--require-improvement", action="store_true",
+                   help="fail unless at least one metric is better with confidence (experiments)")
+    p.add_argument("--n-boot", type=int, default=10000)
+    p.add_argument("--report", default=None, help="also write the verdict as Markdown")
+
+    # studio
+    p = add("serve", cmd_serve, "Voice studio: upload a sample, clean it, hear and train the clone in a browser")
+    p.add_argument("--root", default="studio", help="where voices are kept")
+    p.add_argument("--host", default="127.0.0.1", help="127.0.0.1 keeps it on this computer")
+    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--model", default=DEFAULT_MODEL)
+    p.add_argument("--enhance-python", default=None,
+                   help="python of an env with clearvoice: offers MossFormer2 enhancement on the page")
+    p.add_argument("--min-train-minutes", type=float, default=8.0)
+    ecapa(p)
+    return ap
+
+
+def main(argv=None):
+    a = build_parser().parse_args(argv)
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()

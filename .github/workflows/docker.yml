@@ -1,0 +1,136 @@
+name: docker
+# Builds the images and pushes them to ghcr.io/<owner>/indic-voice-clone when
+# main changes (a merged pull request):
+#   :latest  CPU torch, linux/amd64 and linux/arm64
+#   :cuda    CUDA 12.6 torch, linux/amd64 (run with --gpus all on an NVIDIA host)
+# Pull requests that touch the image build and smoke-test both on amd64,
+# without pushing, so a broken Dockerfile is caught before it reaches main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths: [Dockerfile, .dockerignore, pyproject.toml, constraints.txt, "src/**", .github/workflows/docker.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.licenses=Apache-2.0
+          annotations: |
+            org.opencontainers.image.licenses=Apache-2.0
+      - name: Build for amd64 and load it locally
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: voiceclone:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test
+        run: |
+          docker run --rm voiceclone:test --help > /dev/null
+          docker run --rm --entrypoint python voiceclone:test -c "import torch, transformers, peft, speechbrain, fastapi, audioseal, voiceclone.studio.app, voiceclone.watermark; print('torch', torch.__version__)"
+          docker run -d --name studio -p 8000:8000 voiceclone:test
+          for _ in $(seq 30); do curl -sf localhost:8000/api/config > /dev/null && break; sleep 2; done
+          curl -sf localhost:8000/api/config
+          curl -sf localhost:8000/ | grep -q "Voice studio"
+          docker rm -f studio
+      - name: Build both platforms and push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  cuda:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Free disk space (the CUDA image is about 6 GB)
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@v4
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: suffix=-cuda,onlatest=false
+          tags: |
+            type=raw,value=cuda,suffix=,enable={{is_default_branch}}
+            type=sha,format=short
+          labels: |
+            org.opencontainers.image.licenses=Apache-2.0
+          annotations: |
+            org.opencontainers.image.licenses=Apache-2.0
+      - name: Build (CUDA) and load it locally
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: TORCH_INDEX=cu126
+          load: true
+          tags: voiceclone:cuda-test
+          cache-from: type=gha,scope=cuda
+          cache-to: type=gha,scope=cuda,mode=min
+      - name: Smoke test (no GPU on this runner, so it checks the CUDA build is there)
+        run: |
+          docker run --rm --entrypoint python voiceclone:cuda-test -c "import torch, voiceclone.studio.app; assert torch.version.cuda, 'not a CUDA build'; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
+          docker run --rm voiceclone:cuda-test --help > /dev/null
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: TORCH_INDEX=cu126
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha,scope=cuda

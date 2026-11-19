@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice studio</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="side">
+    <div class="brand"><span class="mark" aria-hidden="true"></span>Voice studio</div>
+    <button id="new-voice" class="btn btn-ink wide">+ New voice</button>
+    <h2 class="side-h">Your voices</h2>
+    <ul id="voice-list" class="voice-list"></ul>
+    <p id="empty-list" class="muted small" hidden>No voices yet.</p>
+  </aside>
+
+  <main class="main">
+    <!-- create -->
+    <section id="view-create" class="view">
+      <header class="view-head">
+        <h1>Clone a voice</h1>
+        <p class="muted">Upload a short sample. It is cleaned of noise, then you can hear the voice say anything.</p>
+      </header>
+
+      <form id="create-form" class="card form" novalidate>
+        <div class="row">
+          <label class="field grow">
+            <span class="label">Voice name</span>
+            <input id="f-name" name="name" maxlength="80" autocomplete="off" placeholder="e.g. Narrator, 1990s tapes">
+          </label>
+          <label class="field">
+            <span class="label">Language</span>
+            <select id="f-lang" name="lang"></select>
+          </label>
+        </div>
+
+        <div class="split">
+          <div class="tips">
+            <h3>What makes a good sample</h3>
+            <ol>
+              <li><b>5 to 45 seconds</b> of speech; 15 to 30 seconds works best.</li>
+              <li><b>Only this person</b> speaking: no other voices, music or bells.</li>
+              <li>Natural speech in their usual dialect, at a steady volume.</li>
+              <li>Old or noisy recordings are fine: noise and hum are cleaned off before cloning. Heavy echo is the one thing cleaning cannot fix.</li>
+            </ol>
+            <p class="muted small">For a clone that keeps the accent closely, add longer recordings after this step and train it.</p>
+          </div>
+
+          <div id="drop" class="drop" tabindex="0">
+            <div id="drop-idle">
+              <p class="drop-title">Add a voice sample</p>
+              <p class="muted">Drop a file here, or</p>
+              <div class="drop-actions">
+                <label class="btn btn-ink">Choose file<input id="f-file" type="file" accept="audio/*,.webm,.mp4" hidden></label>
+                <button type="button" id="rec-start" class="btn btn-line"><span class="dot"></span>Record</button>
+              </div>
+              <p class="muted small">WAV, MP3, M4A, FLAC, OGG or WebM, up to <span id="max-mb">30</span> MB</p>
+            </div>
+            <div id="drop-recording" hidden>
+              <p class="drop-title"><span class="dot live"></span>Recording <span id="rec-time">0:00</span></p>
+              <p class="muted small">Speak naturally. Stop between 15 and 45 seconds.</p>
+              <button type="button" id="rec-stop" class="btn btn-ink">Stop</button>
+            </div>
+            <div id="drop-chosen" hidden>
+              <p class="drop-title" id="chosen-name"></p>
+              <audio id="chosen-audio" controls></audio>
+              <button type="button" id="chosen-clear" class="btn btn-quiet small">Remove</button>
+            </div>
+          </div>
+        </div>
+
+        <details class="opts">
+          <summary>Cleaning and reference options</summary>
+          <div class="opt-group" id="o-create-clean"></div>
+          <div class="opt-group" id="o-create-reference"></div>
+        </details>
+
+        <details class="more">
+          <summary>I know exactly what is said in the sample (optional)</summary>
+          <p class="muted small">Leave empty and it is transcribed automatically. Only fill this in if it matches the audio word for word.</p>
+          <textarea id="f-text" rows="2" maxlength="1000" lang="kn"></textarea>
+        </details>
+
+        <p id="create-error" class="error" role="alert" hidden></p>
+        <div class="actions"><button id="create-submit" class="btn btn-accent" type="submit">Clone voice</button></div>
+      </form>
+    </section>
+
+    <!-- voice -->
+    <section id="view-voice" class="view" hidden>
+      <header class="view-head with-actions">
+        <div>
+          <h1 id="v-name"></h1>
+          <p class="muted" id="v-meta"></p>
+        </div>
+        <button id="v-delete" class="btn btn-quiet">Delete</button>
+      </header>
+
+      <ol id="v-steps" class="steps"></ol>
+      <p id="v-error" class="error" role="alert" hidden></p>
+
+      <div class="card" id="v-audio-card" hidden>
+        <h3>Cleaning</h3>
+        <div class="pair">
+          <figure><figcaption>Uploaded</figcaption><audio id="a-original" controls preload="none"></audio></figure>
+          <figure><figcaption>After cleaning</figcaption><audio id="a-clean" controls preload="none"></audio></figure>
+        </div>
+        <p class="muted small" id="v-clean-used"></p>
+        <details class="opts" id="v-reclean">
+          <summary>Clean again with other options</summary>
+          <div class="opt-group" id="o-voice-clean"></div>
+          <div class="opt-group" id="o-voice-reference"></div>
+          <p class="muted small">The reference clip may change, so its words are transcribed again.</p>
+          <div class="actions"><button id="v-reclean-go" class="btn btn-line">Clean again</button></div>
+        </details>
+      </div>
+
+      <div class="card" id="v-ref-card" hidden>
+        <h3>Reference clip</h3>
+        <p class="muted small">The clone is modelled on this part of the sample. Its words must match the audio exactly; correct them if the transcription got anything wrong.</p>
+        <audio id="a-reference" controls preload="none"></audio>
+        <textarea id="v-ref-text" rows="2" maxlength="1000" lang="kn"></textarea>
+        <div class="actions"><span id="ref-saved" class="muted small" hidden>Saved</span><button id="v-ref-save" class="btn btn-line">Save words</button></div>
+      </div>
+
+      <div class="card" id="v-try-card" hidden>
+        <h3>Try the voice</h3>
+        <textarea id="v-say" rows="3" maxlength="400" lang="kn" placeholder="Type what the voice should say"></textarea>
+        <details class="opts">
+          <summary>Generation options</summary>
+          <div class="opt-group" id="o-generate"></div>
+        </details>
+        <div class="actions">
+          <span id="v-model-badge" class="badge"></span>
+          <button id="v-generate" class="btn btn-accent">Generate</button>
+        </div>
+        <ul id="v-previews" class="previews"></ul>
+      </div>
+
+      <div class="card" id="v-train-card" hidden>
+        <h3>Train a stronger clone</h3>
+        <p class="muted small">The instant clone copies the voice's colour but often not the accent. Training learns the accent from longer recordings: it needs at least <b id="min-min">8</b> minutes of this person speaking alone, after cleaning and filtering, and takes several hours. Other speakers in the recordings are filtered out using this voice's sample.</p>
+        <ul id="v-recordings" class="files"></ul>
+        <details class="opts">
+          <summary>Training options</summary>
+          <div class="opt-group" id="o-train"></div>
+        </details>
+        <div class="actions">
+          <label class="btn btn-line">Add recordings<input id="v-rec-files" type="file" accept="audio/*" multiple hidden></label>
+          <button id="v-train" class="btn btn-ink">Start training</button>
+        </div>
+        <p id="v-train-status" class="small"></p>
+        <pre id="v-train-log" class="log" hidden></pre>
+      </div>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

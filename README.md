@@ -1,0 +1,672 @@
+# indic-voice-clone
+
+Clone one speaker of an Indic language, regional accent included, from a few
+archival recordings. It was built and tested on northern Kannada lecture tapes,
+on a 16 GB Apple-silicon laptop. The voice model and codec are open-source and
+licensed for commercial use. This code is open source under Apache 2.0; no
+audio is licensed (see [Licence](#licence)).
+
+How it works: the recordings are cleaned lightly and cut into short chunks.
+Each chunk is transcribed verbatim in the dialect, and only clean chunks of
+the target speaker are kept. Those chunks LoRA-fine-tune the
+[Svara-TTS voice-clone model](https://huggingface.co/kenpath/svara-tts-voiceclone-beta)
+in the same "reference-swap" prompt format the model uses at inference.
+
+## Prerequisites
+
+**Hardware**
+- An Apple-silicon Mac with 16 GB of memory, or a Linux machine with an
+  NVIDIA GPU with 16 GB or more of VRAM. Only the Mac has been tested; the
+  code picks CUDA automatically when it is available.
+- About 15 GB of free disk. The Svara model alone is 6.2 GB, the alignment
+  model is 1.2 GB, and the Python environment is about 1 GB.
+
+**Software**
+- Python 3.10 or newer (3.12 is tested).
+- [uv](https://docs.astral.sh/uv/), or pip with a virtual environment.
+- [ffmpeg](https://ffmpeg.org/) on your `PATH` (`brew install ffmpeg` or
+  `apt install ffmpeg`).
+- A [Hugging Face](https://huggingface.co/) account. Transcription uses
+  AI4Bharat IndicConformer, which is gated: open
+  [its model page](https://huggingface.co/ai4bharat/indic-conformer-600m-multilingual),
+  accept the terms, then run `hf auth login`.
+
+**Optional**
+- Audacity 3.x, for removing hiss, mains hum and clicks from tape. Audacity
+  4 has no scripting. Enable `mod-script-pipe` under Preferences, Modules,
+  then restart Audacity. The `audacity-denoise` step currently assumes
+  macOS and `~/Applications/Audacity 3.7.app`; pass `--app` for another path.
+  It quits and relaunches Audacity for every file, so it refuses to start
+  while Audacity is open unless you pass `--force-restart`.
+- A second Python environment for ClearerVoice neural denoising, because
+  `clearvoice` needs `numpy<2` (see Installation).
+
+**Languages**
+- Text in Kannada, Telugu, Tamil, Malayalam, Devanagari (Hindi, Marathi,
+  Sanskrit, Nepali), Bengali/Assamese, Gujarati, Gurmukhi and Odia is
+  transliterated for alignment, length limits and scoring. Only Kannada has
+  been tested end to end. Text in other scripts, such as Urdu, can still be
+  synthesised, but only with the 20-second length cap, and the alignment-based
+  steps cannot use it.
+
+**Recordings**
+- At least 10 to 20 minutes of the target speaker after cleaning. The
+  reference results used about 23 minutes from one 32-minute lecture.
+- Any format ffmpeg reads. MP3 at 128 kbps is fine.
+- The right to use the voice. Only clone someone who has consented, or whose
+  estate has.
+
+## Installation
+
+Pick the route that reaches your machine's GPU: generating speech with the
+3B model on a CPU takes minutes per sentence, and training needs a GPU.
+
+| Your machine | Use | Runs on |
+|---|---|---|
+| Mac with Apple silicon | [native install](#native-install) | Apple GPU |
+| Linux with an NVIDIA GPU | [`:cuda` Docker image](#docker), or the native install | CUDA |
+| Anything else, or a quick try | [`:latest` Docker image](#docker) | CPU |
+| Working on the code | [from source](#from-source) | whatever the machine has |
+
+### Native install
+
+```bash
+brew install ffmpeg uv
+```
+
+```bash
+uv tool install "indic-voice-clone[all]"
+```
+
+```bash
+voiceclone serve
+```
+
+Open http://127.0.0.1:8000. On Linux, install `ffmpeg` with your package
+manager and uv from https://docs.astral.sh/uv/. A C++ compiler is needed once,
+to build the aligner (`xcode-select --install` on a Mac; `build-essential`
+on Debian or Ubuntu). For the gated IndicConformer model, accept its terms on
+Hugging Face and run `hf auth login`, or set `HF_TOKEN`. The models need about
+10 GB of disk on first use. `uv tool upgrade indic-voice-clone` updates it.
+
+The package is published to PyPI from each release (see
+[CONTRIBUTING.md](CONTRIBUTING.md#releasing)). Until the first release,
+install from source.
+
+### From source
+
+```bash
+git clone https://github.com/svayatta/indic-voice-clone.git
+cd indic-voice-clone
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -e ".[all]" -c constraints.txt
+source .venv/bin/activate
+voiceclone --help
+```
+
+`constraints.txt` pins the exact versions behind the reference results
+(Python 3.12, macOS arm64). Leave it out to take the newest releases, at
+the risk of behaviour changes.
+
+The extras are `tts` for synthesis and training, `align` for forced
+alignment and character error, `speaker` for voiceprints, `asr` for
+IndicConformer, and `all` for everything. Models download on first use:
+Svara and IndicConformer go to the Hugging Face cache, and the alignment
+model goes to `~/ctc_forced_aligner/`.
+
+Optional ClearerVoice environment:
+
+```bash
+uv venv --python 3.12 .venv-enh
+uv pip install --python .venv-enh/bin/python clearvoice "numpy<2" -e .
+```
+
+## Getting started
+
+This walk-through turns one recording, `talk.mp3`, into a fine-tuned voice
+and six test sentences. Run it from the repository root. Everything is
+written under `data/`, `models/` and `outputs/`, which git ignores.
+
+**1. Prepare the recording.** This decodes the file, restores it lightly,
+cuts it into 3 to 10 second chunks at natural pauses, and transcribes each
+chunk verbatim.
+
+```bash
+voiceclone prepare talk.mp3 talk --lang kn
+```
+
+The chunks and `transcripts.jsonl` land in `data/vad_talk/`. Add
+`--enhance-python .venv-enh/bin/python` to denoise the chunks with
+ClearerVoice first; the output then lands in `data/vad_talk_se/`.
+Transcription takes a while: each chunk is a separate model call.
+
+**2. Pick enrollment clips.** The filter in the next step keeps only chunks
+that sound like the target speaker, so it needs a voiceprint to compare
+against. Listen to a few chunks and copy 10 or more that are certainly the
+target speaker, then index them:
+
+```bash
+mkdir -p data/enroll
+cp data/vad_talk/talk_0012.wav data/vad_talk/talk_0015.wav ... data/enroll/
+python -c "import json,pathlib; d=pathlib.Path('data/enroll'); \
+open(d/'metadata.jsonl','w').writelines(json.dumps({'file':p.name})+'\n' for p in sorted(d.glob('*.wav')))"
+```
+
+**3. Build the training set.** This drops chunks that are another speaker,
+too few words, an implausible speaking rate, or a transcript that does not
+fit the audio. It prints what was dropped and why.
+
+```bash
+voiceclone build-clips --vad data/vad_talk --enroll data/enroll --n-enroll 10 --out data/clips
+```
+
+Repeat `--vad` to combine several prepared recordings.
+
+**4. Fine-tune.** Six clips are held out for evaluation and listed in
+`models/lora/holdout.json`. The final adapter is saved in `models/lora/`,
+and every 50 optimizer steps a copy is kept in `models/lora/checkpoint-NNNNN/`
+(about 100 MB each), so you can go back to an earlier one if it sounds
+better. Change the interval with `--save-every`.
+
+```bash
+voiceclone train --clips data/clips --out models/lora --epochs 2
+```
+
+On an Apple M5 with 16 GB, 23 minutes of clips over 2 epochs took about 70
+minutes, at 31 to 42 seconds per optimizer step.
+
+**5. Synthesize.** Choose a clean 4 to 8 second clip from `data/clips` as the
+reference, and put its text from `data/clips/metadata.jsonl` in a file.
+
+```bash
+voiceclone synth --lora models/lora \
+    --ref data/clips/talk_0073.wav --ref-text-file ref.txt \
+    --text-file examples/test_sentences_kn.txt --min-sps 2.5 \
+    --out outputs/lora
+```
+
+Each sentence takes about 30 to 75 seconds on the same laptop. The output is
+`outputs/lora/sample_XX.wav` plus `log.json`. Use `--text "..."` for a
+single sentence.
+
+**6. Tidy and measure.**
+
+```bash
+voiceclone trim --samples outputs/lora
+voiceclone eval-similarity --clips data/clips --samples outputs/lora_trimmed
+voiceclone eval-intelligibility --clips data/clips --samples outputs/lora_trimmed \
+    --holdout models/lora/holdout.json
+```
+
+Both reports include the speaker's real clips as a baseline, so compare the
+clone against those numbers rather than against perfect scores. In the
+reference run, the speaker's real clips scored about 0.75 to 0.78 voice
+similarity and the clone scored 0.61 to 0.72. Numbers do not judge accent, though: have native
+speakers of the dialect listen.
+
+**7. Improve (optional).** Generate several takes with different `--seed`
+values and keep the best one per sentence with `best-of`. It pairs takes by
+the sentence recorded in each folder's `log.json`, so folders made from
+differently ordered sentence files still compare correctly. Add more
+recordings with `prepare`, then retrain or continue training with
+`train --init-adapter models/lora --lr 1e-4`.
+
+## Voice studio (web app)
+
+A local web page for the whole flow: name a voice, drop a 5-45 s sample or
+record one in the browser, and the server cleans it (by default the same
+ffmpeg restoration as `prepare`), picks the clearest 3-10 s stretch as the
+reference, transcribes it verbatim and makes an instant clone you can type
+text for. You can hear the upload and
+the cleaned audio side by side, and correct the reference words. With longer
+recordings of the same person (8 minutes or more of their speech alone), it
+also trains a LoRA clone. The sample decides which voice to keep, other
+speakers are filtered out, and previews then use the trained adapter.
+
+```bash
+uv pip install --python .venv/bin/python -e ".[all]" -c constraints.txt
+voiceclone serve --root studio            # http://127.0.0.1:8000
+```
+
+Every step has options, in collapsible panels with **All on**, **All off**
+and **Defaults** buttons:
+
+| Panel | Options |
+|---|---|
+| Cleaning (new voice, or "Clean again") | declip; high-pass and its cut-off; spectral denoise, its strength and noise floor; MossFormer2 enhancement, its mix and super-resolution; peak normalisation |
+| Reference clip | the clearest 3-10 s stretch, or the whole sample (first 15 s) |
+| Generation | instant or trained clone; number of takes and first seed; temperature, top-p, repetition penalty, longest take |
+| Training | enhancement of the recordings; speaker-match threshold; pitch gate and its range; epochs, learning rate, LoRA rank, held-out clips, seed |
+
+The defaults are the settings behind the reference results. MossFormer2
+options are offered only when the server is started with
+`--enhance-python` pointing at an environment with `clearvoice`. Each voice
+records the options it was cleaned and trained with, and each preview records
+its generation settings.
+
+Voices are kept under `studio/voices/<id>/`: the upload, `clean.wav`,
+`reference.wav`, previews and training output. Jobs run one at a time,
+because the 3B model and training do not fit in memory together. The server
+listens on this computer only unless you pass `--host`.
+
+## Docker
+
+Each merge to `main` publishes an image for linux/amd64 and linux/arm64 to
+`ghcr.io/svayatta/indic-voice-clone` (`latest`, plus a `sha-…` tag per
+commit). It contains the `voiceclone` command and every extra, and runs the
+voice studio by default.
+
+### Before you start
+
+- **A Docker engine.** Docker Desktop, OrbStack or Podman on macOS or
+  Windows; Docker Engine on Linux.
+- **Memory for the engine's VM.** Give it at least 16 GB if you'll generate
+  speech: on CPU the 3B model loads in 32-bit floats, about 12 GB. Docker
+  Desktop's default is often lower (Settings → Resources). Cleaning and
+  transcription alone need about 4 GB.
+- **Disk.** About 2 GB for the image and 10 GB for the models it downloads on
+  first use.
+- **A Hugging Face token** that can read the gated
+  [IndicConformer](https://huggingface.co/ai4bharat/indic-conformer-600m-multilingual)
+  model (accept its terms first). A read-only token is enough.
+
+### Run the studio
+
+`:latest` runs on any machine with CPU-only torch. On a Linux host with an
+NVIDIA GPU and the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/),
+use `:cuda` with `--gpus all` instead (linux/amd64, about 6 GB, CUDA 12.6;
+any CUDA 12 driver, 525 or newer):
+
+```bash
+docker run -d --name voiceclone --gpus all -p 127.0.0.1:8000:8000 -v voiceclone:/data -e HF_TOKEN=hf_... ghcr.io/svayatta/indic-voice-clone:cuda
+```
+
+On a CPU-only machine:
+
+```bash
+docker pull ghcr.io/svayatta/indic-voice-clone:latest
+```
+
+```bash
+docker run -d --name voiceclone -p 127.0.0.1:8000:8000 -v voiceclone:/data -e HF_TOKEN=hf_... ghcr.io/svayatta/indic-voice-clone:latest
+```
+
+Open http://127.0.0.1:8000. The first sample takes a few minutes while the
+models download into the `voiceclone` volume; later runs reuse them.
+`127.0.0.1:` keeps the studio reachable from this computer only.
+
+| To | Run |
+|---|---|
+| Follow the log | `docker logs -f voiceclone` |
+| Stop it | `docker stop voiceclone` |
+| Start it again (same settings and data) | `docker start voiceclone` |
+| Update to the newest image | `docker pull ghcr.io/svayatta/indic-voice-clone:latest`, then `docker rm -f voiceclone` and the `docker run` above |
+| Remove the container | `docker rm -f voiceclone` (voices and models stay in the volume) |
+| Delete all voices and downloaded models | `docker volume rm voiceclone` |
+
+To keep the data in a visible folder instead of a volume, use
+`-v "$HOME/voiceclone-data:/data"`. On Linux, that folder must be writable by
+user id 1000, the container's user.
+
+### Other commands
+
+Any `voiceclone` subcommand runs the same way. Mount the folder with your
+recordings at `/work`:
+
+```bash
+docker run --rm -v voiceclone:/data -v "$PWD:/work" ghcr.io/svayatta/indic-voice-clone:latest restore /work/talk.mp3 --decode-first --out /work/talk_clean.wav
+```
+
+To check a recording for the [watermark](#watermark):
+
+```bash
+docker run --rm -v voiceclone:/data -v "$PWD:/work" ghcr.io/svayatta/indic-voice-clone:latest detect /work/suspect.mp3
+```
+
+### Build the image yourself
+
+From a checkout of this repository:
+
+```bash
+docker build -t indic-voice-clone .
+```
+
+```bash
+docker run -d --name voiceclone -p 127.0.0.1:8000:8000 -v voiceclone:/data -e HF_TOKEN=hf_... indic-voice-clone
+```
+
+To build for the other architecture (for example amd64 on an Apple-silicon
+Mac), use `docker buildx build --platform linux/amd64 -t indic-voice-clone --load .`.
+It builds under emulation, so it takes longer.
+
+### What it can't do
+
+Docker on a Mac can't use the Apple GPU, so on a Mac the image always runs on
+CPU. Cleaning, transcription and the studio are fine there, but synthesis with
+the 3B model takes minutes per sentence and training is impractical. Use the
+[native install](#native-install) on a Mac, and `:cuda` or the native install
+on an NVIDIA machine.
+
+If `docker pull` says `denied`, the package is private. Run
+`docker login ghcr.io` with a GitHub token that has `read:packages`.
+
+## Watermark
+
+Every take the software generates carries an inaudible watermark: studio
+previews, `synth`, `long-form` and benchmark runs alike. It is
+[AudioSeal](https://github.com/facebookresearch/audioseal) (Meta, MIT) with a
+fixed 16-bit tag that identifies this software. There is no option to turn it
+off. To check a recording:
+
+```bash
+voiceclone detect suspect.mp3 another.wav
+```
+
+```
+suspect.mp3: made with indic-voice-clone (detector 1.00, 16/16 tag bits)
+another.wav: no watermark found (detector 0.00, 8/16 tag bits)
+```
+
+On our tests it survives MP3, AAC and Opus compression, telephone-band (8 kHz)
+audio, cropping and volume changes, and it sits about 26 dB below the voice.
+Genuine recordings of the speaker scored 0.
+
+What it can't do:
+
+- It marks what *this software* makes. Anyone can edit the code to remove the
+  mark, or run a trained adapter with other software. It is a label that
+  honest use keeps, not a lock.
+- Heavy added noise weakens it, so not finding it doesn't prove a recording
+  is genuine.
+- "Another source" means an AudioSeal mark with a different tag, from other
+  software that uses AudioSeal.
+
+## Comparing runs
+
+`eval-similarity` and `eval-intelligibility` say how one folder of samples
+scores. To decide whether one adapter (or training recipe) is better than
+another, the scores must come from the same test: the same held-out speech,
+the same reference clip, the same sentences and seeds. `benchmark` fixes all
+of that in a spec file and refuses adapters that trained on the test audio.
+
+**1. Hold out whole recordings.** Similarity differs between clips of the
+same session and clips of another session, and an adapter that trained on a
+recording has heard its room, microphone and words. So hold out complete
+recordings, not clips. Prepare one or
+two recordings that no adapter will train on and build their clips into a
+folder of their own:
+
+```bash
+voiceclone prepare talk9.mp3 TALK9 --lang kn
+voiceclone build-clips --vad data/vad_TALK9 --enroll data/enroll --out data/clips_holdout
+```
+
+**2. Write the spec.** Copy `examples/bench_spec.example.json` (outside
+git, for example to `data/bench.json`) and fill in the held-out clip folder,
+the recording names in `holdout.sources`, and a conditioning clip with its
+exact text. A recording's name is a clip's `source` field (kept by
+`import-vault`), or else its file name without the chunk number: `prepare`
+names chunks `TAG_NNNN.wav`, so the recording is `TAG`. The sentences are
+stored in the spec itself, and the spec's hash is stored with every result,
+so editing a spec starts a new benchmark rather than silently changing an
+old one. `seeds` (default 0, 1, 2) sets how many takes each sentence gets.
+
+**3. Run each adapter.**
+
+```bash
+voiceclone benchmark --spec data/bench.json --lora models/lora --out outputs/bench/lora
+voiceclone benchmark --spec data/bench.json --lora models/lora_v2/checkpoint-00150 --out outputs/bench/v2_150
+voiceclone benchmark --spec data/bench.json --out outputs/bench/zeroshot
+```
+
+Each run writes `seed_S/sample_XX.wav` (with `log.json`, so `trim` and
+`best-of` work on them), `spec.json` and `scores.json`, and appends one row
+to `outputs/bench/results.jsonl`: the adapter, its training parameters and
+the recordings it trained on, and the scores. A run that is interrupted
+resumes where it stopped. Six sentences and three seeds are 18 takes, about
+10 to 25 minutes on an M5.
+
+Scores per take, each also given for the speaker's real held-out clips:
+
+| Score | Meaning | Better |
+|---|---|---|
+| `sim` | ECAPA cosine to the held-out voiceprint; each real clip is scored against the other held-out clips | higher |
+| `cer` | character error of the MMS recogniser's decode | lower |
+| `len_ratio` | length against 3.2 syllables/s; `len_err` is how far it is from the speaker's own ratio | closer to real |
+| `stopped` | generation ended by itself, not at the length cap | higher |
+
+The relative scores divide by the real clips' value: `sim` 90% means the
+clone is 90% as close to the voiceprint as his own recordings are. A take
+with no audio scores as no voice and nothing heard instead of being dropped.
+
+Before synthesizing anything, `benchmark` reads the adapter's
+`train_log.json` (a `checkpoint-NNNNN/` uses its run folder's), the clip
+folder it names and its `metadata.jsonl`, and follows `--init-adapter`
+chains. If a held-out recording or the conditioning clip's recording is
+among the training clips, or the training data cannot be found, it refuses.
+`--train-clips DIR` names the training clips when the log's relative path
+does not resolve from here; `--allow-leak` scores anyway and flags the row.
+
+**4. Compare two runs.**
+
+```bash
+voiceclone compare outputs/bench/lora outputs/bench/v2_150
+```
+
+Takes are paired by sentence and seed, and the mean difference (B minus A)
+gets a 95% bootstrap interval that resamples whole sentences. A metric says
+`B better` or `A better` only when its interval excludes zero; otherwise it
+says `no clear difference`, which with six sentences is a common and honest
+answer. Add sentences to the spec, as a new benchmark, to resolve smaller
+differences.
+
+**5. Listen blind.** Numbers do not judge accent, so ask native speakers:
+
+```bash
+voiceclone listen-page outputs/bench/lora outputs/bench/v2_150 --out outputs/bench/listen.html
+```
+
+This writes one self-contained HTML file (the audio is embedded, roughly 10
+to 20 MB for 18 takes per run) and `listen.key.json`. Send only the HTML. For each
+sentence and seed it plays the two runs' takes as 1 and 2 in random order and
+asks which sounds more like him and which sounds like natural northern
+Kannada; about one trial in six is a hidden check that pairs a real held-out
+recording with a clone. The listener downloads their answers as JSON. Keep
+the key file to yourself, and score the answers with:
+
+```bash
+voiceclone compare outputs/bench/lora outputs/bench/v2_150 \
+    --key outputs/bench/listen.key.json --answers answers_X.json --answers answers_Y.json
+```
+
+This adds B's win rate per question with a 95% interval, and how often each
+listener picked the real recording in the checks. A listener who cannot pick
+out the real recording is guessing, so weigh their answers accordingly.
+
+## Command reference
+
+All steps are subcommands of `voiceclone`; run `voiceclone <step> --help`
+for every option.
+
+| Step | Command | Output |
+|---|---|---|
+| Restore audio | `restore talk.mp3 --decode-first` | mono 24 kHz WAV, mild denoise |
+| Cut at pauses | `vad --audio clean.wav --out data/vad` | 3-10 s chunks + `segments.jsonl` |
+| Transcribe | `transcribe --vad data/vad` | `transcripts.jsonl`, verbatim, resumable |
+| Whole preparation for one file | `prepare talk.mp3 TAG` | `data/vad_TAG[_se]/` |
+| Import Vāṇī-Harness vault (optional) | `import-vault metadata.jsonl --vault-dir VAULT --out data/vault_kn` | vault clips as chunks; then `transcribe` |
+| Analogue noise (optional) | `audacity-denoise talk.mp3 TAG --reuse-chunks data/vad_TAG_se` | hiss, hum, clicks removed |
+| Rank recordings | `rank DIR --enroll data/enroll` | which talks are the speaker, how clean |
+| Build training set | `build-clips --vad data/vad --enroll data/enroll --out data/clips` | speaker- and alignment-filtered clips |
+| Fine-tune | `train --clips data/clips --out models/lora` | LoRA adapter + `holdout.json` |
+| Synthesize | `synth --lora models/lora --ref clip.wav --ref-text-file ref.txt --text "..."` | `sample_XX.wav` + `log.json` |
+| Trim run-ons | `trim --samples outputs/synth` | cut after the last word |
+| Best take | `best-of --takes A --takes B --clips data/clips --out best` | best take per sentence |
+| Voice similarity | `eval-similarity --clips data/clips --samples outputs/synth` | ECAPA cosine vs real clips |
+| Intelligibility | `eval-intelligibility --clips data/clips --samples outputs/synth` | character error vs real clips |
+| Same-words test | `long-form --lora models/lora --chunks data/vad_X --source X.wav --ref clip.wav --ref-text-file ref.txt --out outputs/long` | clone vs original, A/B file |
+| Benchmark a run | `benchmark --spec data/bench.json --lora models/lora --out outputs/bench/lora` | scores + `results.jsonl` row |
+| Compare two runs | `compare outputs/bench/A outputs/bench/B` | paired differences, 95% interval |
+| Blind listening | `listen-page outputs/bench/A outputs/bench/B --out listen.html` | A/B page + answer key |
+| Run a recipe | `run-recipe --recipe ci/recipe.json --data DATA --work RUN --spec DATA/bench.json` | adapter + benchmark run |
+| Quality gate | `gate MAIN_RUN PR_RUN [--require-improvement]` | pass/fail + Markdown report |
+| Web app | `serve --root studio` | the voice studio on port 8000 |
+| Check for the watermark | `detect FILE...` | whether each file was made with this software |
+
+If you have a timed human transcript (`[SS:MM:00] [Speaker] : text`) instead
+of verbatim ASR, use `parse-transcript`, `align` and `segment --speaker NAME`
+in place of `vad`, `transcribe` and `build-clips`. Its clips can also serve
+as the enrollment set. Verbatim ASR gave better results, because a cleaned-up
+transcript teaches the model words the speaker never said.
+
+## Using clips from Vāṇī-Harness
+
+Vāṇī-Harness is a companion restoration pipeline. It
+separates the voice from music and crowd noise, removes room reverberation,
+enhances, and writes admitted 3 to 15 second clips to a "cloning vault" with a
+JSON-lines index. Those clips can replace or add to step 1 of Getting started:
+
+```bash
+voiceclone import-vault path/to/vault/metadata.jsonl --vault-dir path/to/vault --out data/vault_talk
+voiceclone transcribe --vad data/vault_talk
+voiceclone build-clips --vad data/vault_talk --vad data/vad_talk --enroll data/enroll --out data/clips
+```
+
+- **Transcripts are redone.** The vault's Whisper transcripts are not imported;
+  on this archival speech they were unreliable (wrong language, repeated phrases).
+  `transcribe` produces verbatim IndicConformer text instead.
+- **Paths are matched by file name**, so the vault can be copied anywhere.
+  `--min-dnsmos` and `--min-spk` add the vault's own quality and speaker
+  scores as extra gates.
+- **Check the accent before switching.** Dereverberation and enhancement change
+  the sound the model learns. Train one adapter on vault clips and one on
+  lightly restored clips, then compare them with `eval-similarity`,
+  `eval-intelligibility` and native listeners.
+- **Clip edges.** The vault splits long speech at fixed lengths, so clips can
+  start or end mid-word. `build-clips` does not detect partial edge words yet.
+
+ClearerVoice denoising (`prepare --enhance-python`) now runs speech
+enhancement only. Super-resolution is opt-in (`--steps se,sr` when running
+`python -m voiceclone.enhance.clearvoice` directly), because on archival
+lecture audio it shifted the median formants by hundreds of hertz. Use
+`--enhance-wet 0.9` to mix 10% of the original back in, as Vāṇī-Harness does.
+
+## Troubleshooting
+
+- **Out of memory while training.** Lower `--max-tgt-sec` (default 10.5) and
+  `--max-ref-sec` (default 4.5), or `--rank`. Close other large apps.
+- **The clone rambles past the sentence.** Run `trim`, or raise `--min-sps`
+  to tighten the length cap.
+- **The clone stops after a syllable.** Lower `--max-sps` to raise the
+  minimum length.
+- **Few clips survive `build-clips`.** Check the drop reasons it prints.
+  `other_speaker` means the enrollment clips do not match, and `score` means
+  transcripts do not fit the audio, often because of noise.
+- **IndicConformer fails to download.** Accept its terms on Hugging Face
+  and run `hf auth login`.
+- **Two runs of the same command give slightly different audio.** That is
+  expected: the SNAC decoder adds a little random noise, and sampling is
+  random unless `--seed` is fixed.
+
+## Notes on keeping the accent
+
+- Transcripts stay verbatim in the dialect. Pronunciation is learned from
+  the audio, but the text must match what was said.
+- Restoration is mild. Aggressive denoising shifts formants, which is where
+  an accent lives.
+- Training uses the same reference-swap prompt as inference, so the adapter
+  learns this speaker and dialect rather than a new speaker-ID token.
+- The LoRA stays unmerged at inference: merging fp32 deltas into bf16
+  weights rounds most of them away.
+- Generation passes `use_cache=True`. The base model's saved config disables
+  the cache, which makes generation about 10x slower.
+
+## Package layout
+
+```
+src/voiceclone/
+  text.py         Kannada transliteration (keeps the inherent vowel), syllables, CER
+  audio.py        loading, normalising, ffmpeg decode and mild restoration
+  transcript.py   timed-transcript parser
+  segment.py      pause-based and alignment-based chunking
+  asr.py          IndicConformer verbatim transcription
+  align.py        MMS CTC forced alignment and greedy decoding
+  speaker.py      ECAPA voiceprints and centroids
+  dataset.py      training-clip filter
+  rank.py         recording ranking
+  svara/tokens.py prompt layout, SNAC token mapping, generation length budget (pure Python)
+  svara/codec.py  SNAC encode/decode
+  svara/synth.py  Synthesizer (zero-shot or LoRA); watermarks every take
+  watermark.py    AudioSeal embed and detect
+  train.py        reference-swap LoRA fine-tuning
+  evaluate.py     similarity, intelligibility, best-of selection
+  benchmark.py    frozen benchmark spec, leakage guard, scoring, leaderboard
+  compare.py      paired bootstrap comparison and listening win rates
+  listen.py       blind A/B listening page
+  postprocess.py  trim to text
+  longform.py     same-words re-voicing
+  enhance/        ClearerVoice and Audacity 3.x denoisers
+  recipe.py       ci/recipe.json: the pipeline the quality gate runs
+  gate.py         pass/fail rules for a candidate against main
+  studio/         the web app: upload, cleaning, previews, training jobs
+  cli.py          the `voiceclone` command
+ci/               hygiene check, gate script and runner notes
+```
+
+## Models and licences
+
+| Component | Licence |
+|---|---|
+| `kenpath/svara-tts-voiceclone-beta` (3B, 19 Indic languages) | Apache 2.0 |
+| `hubertsiuzdak/snac_24khz` codec | MIT |
+| AudioSeal watermark (code and weights) | MIT |
+| AI4Bharat IndicConformer 600M | MIT |
+| SpeechBrain ECAPA-TDNN | Apache 2.0 |
+| ClearerVoice MossFormer2 | Apache 2.0 |
+| `ctc-forced-aligner` code / MMS weights | MIT / CC-BY-NC: use for data prep and evaluation only |
+| Audacity 3.x | GPL, used as an external tool |
+
+This repository contains code only: no recordings, transcripts or trained
+weights.
+
+## Tests
+
+```bash
+uv pip install --python .venv/bin/python -e ".[dev]" -c constraints.txt
+.venv/bin/python -m pytest
+.venv/bin/python ci/check_hygiene.py
+```
+
+The unit tests cover transliteration, transcript parsing, the Svara token and
+prompt layout, pause segmentation, take selection, the benchmark's leakage
+guard, paired comparison and listening page, the gate's rules, recipe checks
+and the studio's API. They need no models (the cleaning tests need ffmpeg).
+`tests/test_watermark.py` needs torch and AudioSeal and is skipped without
+them; CI runs it in its own `watermark` job.
+
+## Contributing and the quality gate
+
+Every pull request runs `ci` (tests and repository rules) on GitHub. Changes
+that can affect the voice also go through `quality-gate`, which trains and
+benchmarks the pull request's recipe with the real model on a self-hosted
+runner and fails if any metric is worse than main. Experiments must also show
+an improvement. See [CONTRIBUTING.md](CONTRIBUTING.md) for the ground rules and
+[ci/README.md](ci/README.md) for the runner.
+
+## Licence
+
+Copyright 2026 Svayatta Forge. The code, documentation and Docker images are
+released under the [Apache License 2.0](LICENSE), commercial use included.
+See [NOTICE](NOTICE).
+
+**No audio is licensed.** The recordings used to develop and test this
+project, their transcripts, and any weights or adapters trained on them are
+not part of the release, and no licence is granted for them: neither Svayatta
+Forge nor the contributors hold the right to distribute them. You need the
+right to use any voice and recording you process yourself.
+
+The models the code downloads have their own licences (see
+[Models and licences](#models-and-licences)). In particular, the MMS
+alignment weights are CC-BY-NC, so commercial use of the full pipeline needs
+a different aligner.

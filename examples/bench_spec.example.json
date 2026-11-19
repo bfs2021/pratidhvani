@@ -1,0 +1,37 @@
+{
+ "name": "kn-north-v1",
+ "holdout": {
+  "clips": "data/clips_holdout",
+  "sources": [
+   "TAG_A",
+   "TAG_B"
+  ],
+  "max_clips": 60
+ },
+ "conditioning": {
+  "wav": "data/clips_holdout/TAG_A_0007.wav",
+  "text": "REPLACE with the exact words of the conditioning clip"
+ },
+ "sentences": [
+  "ನಮಸ್ಕಾರ ರೀ, ಎಲ್ಲಾರೂ ಆರಾಮ ಇದ್ದೀರಿ ಏನು?",
+  "ಇವತ್ತು ಸಂಜೆ ಗುಡಿಯೊಳಗ ಭಜನೆ ಅದ, ಎಲ್ಲಾರೂ ಬರ್ರಿ.",
+  "ರೊಕ್ಕ ಗಳಿಸೋದು ಸುಲಭ ಅದ, ಆದ್ರ ಮನಸ್ಸಿನ ಶಾಂತಿ ಗಳಿಸೋದು ಕಠಿಣ ಅದ.",
+  "ನೀವು ಹೊಲದಾಗ ಕೆಲಸ ಮಾಡ್ತಿರಲಿ, ಮನಿಯೊಳಗ ಇರಲಿ, ದೇವರ ಸ್ಮರಣೆ ಬಿಡಬ್ಯಾಡ್ರಿ.",
+  "ಹುಬ್ಬಳ್ಳಿಯಿಂದ ಧಾರವಾಡಕ್ಕ ಬಸ್ಸಿನ್ಯಾಗ ಹೋಗಬೇಕಂದ್ರ ಒಂದು ತಾಸು ಬೇಕಾಗ್ತದ.",
+  "ಮಕ್ಕಳಿಗೆ ಚಲೋ ವಿದ್ಯೆ ಕೊಡ್ರಿ, ಅದೇ ನಿಜವಾದ ಆಸ್ತಿ."
+ ],
+ "seeds": [
+  0,
+  1,
+  2
+ ],
+ "gen": {
+  "temperature": 0.6,
+  "top_p": 0.95,
+  "repetition_penalty": 1.1,
+  "max_sec": 20.0,
+  "min_sps": 2.0,
+  "max_sps": 6.0
+ },
+ "natural_sps": 3.2
+}

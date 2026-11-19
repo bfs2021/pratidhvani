@@ -1,0 +1,94 @@
+name: quality-gate
+# Scores the cloned voice on the self-hosted runner, where the real model and
+# the private benchmark recordings are. It runs pull-request code on that
+# machine, so:
+#   - it starts only when the person named in the GATE_APPROVER repository
+#     variable adds the `benchmark` label, after reading the change;
+#   - this file and ci/gate.sh are always taken from the base branch
+#     (pull_request_target), so a pull request cannot change how it is gated;
+#   - the label is removed afterwards: new commits need a new review and label;
+#   - the job on the runner has a read-only token; posting the result happens
+#     in a separate job on GitHub's machines.
+# main is scored when a gated pull request first needs it (then cached), or
+# ahead of time with Run workflow. Merges never start a multi-hour run by themselves.
+on:
+  pull_request_target:
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gate   # one model run at a time on the runner
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: >-
+      github.event_name != 'pull_request_target' ||
+      (github.event.label.name == 'benchmark' && vars.GATE_APPROVER != '' &&
+       github.event.sender.login == vars.GATE_APPROVER)
+    runs-on: [self-hosted, macOS, voiceclone-gate]
+    timeout-minutes: 1440
+    steps:
+      - name: Check out the base
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          path: base
+          persist-credentials: false
+      - name: Check out the pull request
+        if: github.event_name == 'pull_request_target'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: head
+          persist-credentials: false
+      - name: Score main
+        if: github.event_name != 'pull_request_target'
+        run: base/ci/gate.sh baseline base
+      - name: Gate the pull request
+        if: github.event_name == 'pull_request_target'
+        env:
+          REQUIRE_IMPROVEMENT: ${{ contains(github.event.pull_request.labels.*.name, 'experiment') && '1' || '0' }}
+        run: base/ci/gate.sh compare base head
+      - name: Keep the report
+        if: always() && github.event_name == 'pull_request_target'
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-report
+          path: gate-report.md
+          if-no-files-found: ignore
+
+  report:
+    needs: gate
+    if: always() && github.event_name == 'pull_request_target' && needs.gate.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write       # labels
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR: ${{ github.event.pull_request.number }}
+      SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: gate-report
+        continue-on-error: true
+      - name: Post the result
+        run: |
+          if [ ! -f gate-report.md ]; then
+            printf '### Quality gate: ERROR\n\nThe run stopped before scoring; see the workflow log.\n' > gate-report.md
+          fi
+          cat gate-report.md >> "$GITHUB_STEP_SUMMARY"
+          state=failure; [ "${{ needs.gate.result }}" = success ] && state=success
+          gh api "repos/${{ github.repository }}/statuses/$SHA" -f state=$state -f context=quality-gate \
+            -f description="$(head -1 gate-report.md | sed 's/^### //')" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh pr comment "$PR" --repo "${{ github.repository }}" --body-file gate-report.md
+      - name: Remove the label
+        if: always()
+        run: gh pr edit "$PR" --repo "${{ github.repository }}" --remove-label benchmark

@@ -1,0 +1,50 @@
+name: ci
+# Runs on GitHub's machines for every push and pull request: the unit tests
+# and the repository rules. It needs no model and no private data.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3   # this action publishes no major-version tags after v7
+      - name: Install ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+      - name: Install the package
+        run: |
+          uv venv --python 3.12
+          uv pip install -e ".[dev]" -c constraints.txt
+      - name: Repository rules (no audio, weights, home paths or sys.path edits; valid recipe)
+        run: .venv/bin/python ci/check_hygiene.py
+      - name: Tests
+        run: .venv/bin/python -m pytest -q
+
+  watermark:
+    # Every generated take must carry the watermark; this needs torch and the
+    # AudioSeal models (CPU builds, downloaded on each run), which `test` avoids.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.3
+      - name: Install ffmpeg
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+      - name: Install the package with CPU torch and AudioSeal
+        run: |
+          uv venv --python 3.12
+          uv pip install torch==2.14.1 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+          uv pip install -e ".[dev]" audioseal -c constraints.txt
+      - name: Watermark tests
+        run: .venv/bin/python -m pytest -q -rs tests/test_watermark.py

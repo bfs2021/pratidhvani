@@ -1,0 +1,16 @@
+{
+ "name": "baseline-v1",
+ "notes": "Main's recipe: speaker/alignment filter over the transcribed chunk folders, then one LoRA from the base model. Folder names are under the gate runner's data folder (see ci/README.md); the benchmark's held-out recordings must not appear here.",
+ "steps": [
+  ["build-clips",
+   "--vad", "{data}/chunks/lecture",
+   "--vad", "{data}/chunks/K14",
+   "--vad", "{data}/chunks/K15",
+   "--vad", "{data}/chunks/K26",
+   "--enroll", "{data}/enroll",
+   "--out", "{work}/clips"],
+  ["train", "--clips", "{work}/clips", "--out", "{work}/adapter",
+   "--epochs", "2", "--lr", "2e-4", "--rank", "16", "--seed", "0", "--save-every", "0"]
+ ],
+ "adapter": "{work}/adapter"
+}

@@ -1,0 +1,20 @@
+indic-voice-clone
+Copyright 2026 Svayatta Forge (https://github.com/svayatta/indic-voice-clone)
+
+The source code and documentation in this repository are licensed under the
+Apache License, Version 2.0 (see LICENSE).
+
+No audio is licensed. The Apache License does not cover, and no licence of
+any kind is granted for:
+  - any audio recording used to develop, train, tune or test this project;
+  - transcripts of those recordings;
+  - model weights or adapters trained on them.
+None of these are included in this repository, its Python package or its
+Docker images. Svayatta Forge and the project's contributors do not hold the
+rights to distribute them.
+
+You are responsible for having the right to use any voice and any recording
+you process with this software.
+
+Models downloaded at runtime have their own licences; see "Models and
+licences" in README.md.

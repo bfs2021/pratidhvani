@@ -1,0 +1,20 @@
+.venv/
+.venv-*/
+data/
+models/
+outputs/
+checkpoints/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.DS_Store
+# never commit recordings or trained weights
+*.wav
+*.mp3
+*.flac
+*.safetensors
+*.npz
+
+# voice studio data (voiceclone serve --root studio)
+/studio/
