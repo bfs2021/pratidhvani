@@ -3,12 +3,48 @@
 प्रतिध्वनि, *pratidhvani*: Sanskrit for "echo", a returning sound. Formerly
 `indic-voice-clone`.
 
-Clone one speaker of an Indic language, regional accent included, from a few
-archival recordings. It was built and tested on northern Kannada lecture tapes,
-on a 16 GB Apple-silicon laptop. The code is open source under Apache 2.0; no
-audio is licensed (see [Licence](#licence)).
+Open, self-hosted tools to keep the voices of India's speakers, accent and
+dialect included. The code is open source under Apache 2.0; no audio is
+licensed (see [Licence](#licence)).
 
-How it works: the recordings are cleaned lightly and cut into short chunks.
+## Why
+
+Much of India's spoken heritage survives only in recordings: lectures,
+discourses, oral histories, radio archives and family tapes. Commercial
+text-to-speech offers a few studio voices per language and flattens regional
+accents, so it cannot bring back a particular person, or the way people speak
+in a particular place. This project's aim: a family, archive, school or
+community should be able to take imperfect recordings of someone and produce
+a voice that sounds like that person and speaks like where they are from, on
+their own hardware, without handing the recordings to anyone.
+
+What it stands for:
+
+- **Faithful accent and dialect.** Verbatim transcripts, light-touch
+  restoration, and native-speaker listening tests, not just numeric scores.
+- **Built for archival audio.** Noisy, reverberant, decades-old recordings,
+  not studio data.
+- **Sovereign.** It runs locally, so the recordings and the trained voice
+  stay with their owners.
+- **Consent and provenance.** Only voices with consent. Every generated clip
+  carries a [watermark](#watermark) that `voiceclone detect` can find.
+- **Measured, not claimed.** Frozen benchmarks, guards against testing on
+  training audio, and a quality gate on every change.
+- **Open.** Apache-2.0 code on openly licensed models, growing from one
+  dialect towards all of India's languages.
+
+Uses it is meant for: hearing a teacher or an elder read new text in their own
+voice; course material in a teacher's voice and dialect; voice banking for
+speakers of Indic languages who are losing their speech; restoring and
+re-voicing archival media with consent; and preserving dialects that
+commercial voice products ignore.
+
+The first test case is a northern Kannada speaker's lecture tapes, cloned on
+a 16 GB Apple-silicon laptop.
+
+## How it works
+
+The recordings are cleaned lightly and cut into short chunks.
 Each chunk is transcribed verbatim in the dialect, and only clean chunks of
 the target speaker are kept. Those chunks LoRA-fine-tune the
 [Svara-TTS voice-clone model](https://huggingface.co/kenpath/svara-tts-voiceclone-beta)
