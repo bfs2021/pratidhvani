@@ -90,5 +90,30 @@ def test_kannada_unchanged_by_script_mapping():
     assert translit("ನಿಮ್ಮ") == "nimma" and translit("ಕ್ಷಮಾ") == "kshamaa"
 
 
+def test_letters_without_a_parallel_kannada_offset_are_preserved():
+    # These letters never land on a Kannada letter at the same block offset,
+    # so shifting the whole block used to drop them from the transliteration.
+    assert translit("ੰ") == "m"       # Gurmukhi tippi -> anusvara
+    assert translit("ৰ") == "ra"      # Assamese ra
+    assert translit("ୱ") == "va"      # Odia wa
+    assert translit("ৎ") == "t"       # Bengali khanda ta
+    assert translit("ਪੰਜਾਬ") == "pamjaaba"
+    assert translit("ৰাম") == "raama"
+    assert translit("ୱାଦ") == "vaada"
+
+
+def test_addak_geminates_the_following_consonant():
+    # Gurmukhi addak has no Kannada counterpart at its offset; it doubles the
+    # next consonant rather than disappearing.
+    assert translit("ੱ") == ""
+    assert translit("ਸੱਤ") == "satta"
+
+
+def test_preserved_letters_keep_syllables_and_aligner_tokens():
+    for word in ("ਪੰਜਾਬ", "ৰাম", "ୱାଦ"):
+        assert syllables(word) > 0
+        assert star_tokens(word)[0], "aligner must get tokens"
+
+
 def test_unsupported_script_gives_empty_not_garbage():
     assert translit("سلام") == "" and syllables("سلام") == 0

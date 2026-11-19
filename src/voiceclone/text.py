@@ -29,6 +29,15 @@ BRAHMIC_BLOCKS = (0x0900, 0x0980, 0x0A00, 0x0A80, 0x0B00, 0x0B80, 0x0C00, 0x0D00
 NUKTA_OFFSET = 0x3C
 # Devanagari candra vowels have no Kannada counterpart at the same offset
 CANDRA = {"\u090D": "ಎ", "\u0911": "ಒ", "\u0945": "ೆ", "\u0949": "ೊ"}
+# Letters that land on an unassigned code point when their block is shifted.
+# Map them to the Kannada letter or sign they correspond to before the offset.
+NO_OFFSET_PEER = {
+    "\u0A70": "ಂ",   # Gurmukhi tippi -> anusvara
+    "\u09F0": "ರ",   # Assamese ra
+    "\u0B71": "ವ",   # Odia wa
+    "\u09CE": "ತ್",  # Bengali khanda ta -> ta + virama
+}
+ADDAK = "\u0A71"  # Gurmukhi addak: doubles the following consonant
 
 
 def _decompose_nukta(ch: str) -> str:
@@ -45,18 +54,34 @@ def _decompose_nukta(ch: str) -> str:
     return ch
 
 
+def _map_char(ch: str) -> str:
+    """Map one character onto its Kannada counterpart (offset or explicit peer)."""
+    if ch in CANDRA:
+        return CANDRA[ch]
+    if ch in NO_OFFSET_PEER:
+        return NO_OFFSET_PEER[ch]
+    c = ord(ch)
+    for base in BRAHMIC_BLOCKS:
+        if base <= c < base + 0x80:
+            return chr(c - base + KANNADA_BLOCK)
+    return ch
+
+
 def to_kannada_script(text: str) -> str:
     """Re-encode any parallel-block Brahmic script as Kannada; other characters unchanged."""
     out = []
-    for ch in "".join(_decompose_nukta(c) for c in text):
-        if ch in CANDRA:
-            out.append(CANDRA[ch]); continue
-        c = ord(ch)
-        for base in BRAHMIC_BLOCKS:
-            if base <= c < base + 0x80:
-                ch = chr(c - base + KANNADA_BLOCK)
-                break
-        out.append(ch)
+    chars = "".join(_decompose_nukta(c) for c in text)
+    i = 0
+    while i < len(chars):
+        ch = chars[i]
+        if ch == ADDAK and i + 1 < len(chars):
+            next_ch = _map_char(chars[i + 1])
+            if next_ch in C:
+                out.append(next_ch + VIRAMA)  # geminate the following consonant
+                i += 1
+                continue
+        out.append(_map_char(ch))
+        i += 1
     return "".join(out)
 
 
